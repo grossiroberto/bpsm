@@ -1,0 +1,1546 @@
+\documentclass[12pt]{article}
+
+\oddsidemargin 0pt\evensidemargin 0pt\marginparwidth 40pt\marginparsep 10pt
+\topmargin 0pt\headsep 10pt\textheight 8.5in\textwidth 6.5in
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{epsfig}
+\usepackage{color}
+\usepackage{amsfonts}
+
+\usepackage{float}
+\floatstyle{boxed}
+\restylefloat{figure}
+
+\usepackage{url}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{prop}[theorem]{Proposition}
+\newtheorem{invariant}{Invariant}
+
+\newenvironment{proof}{\noindent{\bf Proof.\/}}{$~\Box$ \newline}
+\newenvironment{zproof}{\noindent{\bf Proof.\/}}{\newline}
+
+%%% REMARKS AND COMMENTS
+
+\newcommand{\rem}[1]{{\marginpar{\raggedright\scriptsize #1}}}
+\newcommand{\comment}[1]{}
+
+%%% MACROS
+
+\newcommand{\W}{{\omega}}
+\newcommand{\C}{{\alpha}}
+\newcommand{\occ}{{\mathit{occ}}}
+
+\newcommand{\wssm}{\textsc{wssm}}
+\newcommand{\wslm}{\textsc{wslm}}
+\newcommand{\xor}{\textsc{xor}}
+
+%%% TEXT
+\title{Optimal Packed String Matching}
+
+\author{Oren Ben-Kiki\thanks{Intel Research and Development Center, Haifa, Israel.} \and
+Philip Bille\thanks{Technical University of Denmark, Copenhagen, Denmark.}  \and
+Dany Breslauer\thanks{
+Caesarea Rothchild Institute
+for Interdisciplinary Applications of Computer Science, 
+University of Haifa, Haifa, Israel. Partially supported by 
+the European Research Council (ERC) Project SFEROT and by
+the Israeli Science Foundation Grant 
+686/07, 347/09 and 864/11.} \and
+Leszek Gasieniec\thanks{University of Liverpool, Liverpool, United Kindom.}  \and
+Roberto Grossi\thanks{Dipartimento di Informatica, Universit\`a di Pisa, Pisa, Italy. 
+Partially supported by Italian project PRIN AlgoDEEP (2008TFBWL4) of MIUR.}  \and
+Oren Weimann\thanks{Computer Science Department, University of Haifa, Haifa, Israel.} }
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+  In the packed string matching problem it is assumed that 
+  each machine word can accommodate up to $\C$ characters, thus
+  an $n$-character text occupies $ n/ \C $ memory words.
+  We extend the Crochemore-Perrin constant-space
+  $O(n)$-time string matching algorithm to run in optimal $O(n/\C)$ time 
+  and even in real-time, achieving a factor $\C$ speedup over traditional
+  algorithms that examine each character individually.
+  Benchmarks show that our solution can be efficiently implemented,
+  unlike prior theoretical packed string matching work.
+
+  Our algorithm only uses the standard $\mathop{AC}^0$ instructions
+   of the RAM model 
+  plus two specialized $\mathop{AC}^0$ word-size packed string instructions,
+  i.e.~no integer multiplication.
+  The main {\em string-matching} instruction \wssm\ 
+  is available in Intel's commodity processors, in SSE4.2/AVX Advanced String Operations.
+  The other {\em maximal-suffix} instruction \wslm\ is  required 
+  only during the pattern preprocessing.
+  In the absence of these specialized packed string instructions,
+  we propose alternative theoretically-efficient emulations:
+  using the four Russian's table lookup technique to emulate \wslm\ and 
+  using parallel algorithms techniques to emulate \wssm\ via
+  standard integer multiplication instructions
+  (integer multiplication is not $\mathop{AC}^0$, but is typically highly optimized).
+  
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+Hundreds of articles have been published about string matching,
+exploring the multitude of theoretical and practical facets of this
+fundamental problem.
+For an $n$-character text~$T$ and an $m$-character pattern~$x$,
+the classical algorithm by Knuth, Morris and Pratt~\cite{kmp:77} 
+takes $O(n+m)$ time and uses $O(m)$ auxiliary space to
+find all pattern occurrences in the text, namely,
+all text positions $i$, such that $T[i..i+m-1]=x$.
+Many other algorithms have been published; some are faster
+on the average, use only constant auxiliary space, operate in
+real-time, or have other interesting benefits.
+In an extensive study, Faro and Lecroq~\cite{FL2011}
+offer an experimental comparative evaluation of some $85$
+string matching algorithms.
+
+\paragraph{Packed strings.} In modern computers, the size of a machine word 
+is typically larger than the size of an alphabet character 
+ and the machine level instructions operate on whole words,
+i.e., 64-bit or longer words 
+vs.~8-bit ASCII, 16-bit UCS, 2-bits biological DNA, 
+5-bits amino acid alphabets, etc.
+The {\em packed string representation} fits multiple characters into one larger
+word, so that the characters can be compared in bulk rather 
+than individually: 
+if the characters of a string are drawn from an alphabet $\Sigma$, then a
+word of $\W \geq \log_2 n$ bits fits up to $\C$ characters, where the packing factor
+is $\C=\frac{\W}{\log_2 |\Sigma|} \geq \log_{|\Sigma|} n$.
+Throughout the paper, we assume that 
+$|\Sigma|$ is a power of two, 
+$\W$ is divisible by $\log_2 |\Sigma|$, and 
+the packing factor $\C$ is a whole integer.
+
+
+Using the packed string representation in the string matching problem
+is not a new idea and %an old idea that % 
+goes back to early string matching papers by Knuth, Morris and
+Pratt~\cite[\S 4]{kmp:77} and Boyer and Moore~\cite[\S 8-9]{bm:77},
+to times when hardware 
+character byte addressing was new and 
+often less efficient than word addressing.
+Since then, several practical solutions that take advantage of the
+packed string representation have been proposed in the
+literature~\cite{baezayates:1989,kbn:2007,fl:2009,fredriksson:2002,fredriksson:2003,nr:98,tp:1997}.
+However, none of these algorithms improves over the worst-case $O(n)$
+time bounds of the traditional algorithms. On the other hand, any string
+matching algorithm should take at least $\Omega(n/\C)$ time  to read a packed
+text in the worst case, so there remains a gap to fill.
+Note that on the average, 
+it is not even required to examine all the text characters~\cite{bm:77,yao:79}.
+
+\paragraph{Existing work.}  A significant theoretical step recently taken introduces a few
+solutions based on either tabulation (a.k.a.~``the Four-Russian
+technique'') or word-level parallelism (a.k.a.~``bit-parallelism'').  Fredriksson~\cite{fredriksson:2002,fredriksson:2003} used tabulation and obtained an algorithm that uses
+$O(n^\varepsilon m)$ space and $O(\frac{n}{\log_{|\Sigma|} n} +
+n^\varepsilon m+ \occ)$ time, where $\occ$ denotes the number of
+pattern occurrences and $\varepsilon > 0$ denotes an arbitrary  small
+constant. Bille~\cite{bille:2011} improved these bounds to
+$O(n^\varepsilon + m)$ space and $O(\frac{n}{\log_{|\Sigma|} n} + m+
+\occ)$ time. Very recently, Belazzougui~\cite{belazzougui:10} showed
+how to use word-level parallelism to obtain $O(m)$ space and $O(\frac{n}{m} + \frac{n}{\C}+m+\occ)$ time. Belazzougui's algorithm uses a number of succinct data structures as well as hashing: for $\C
+\leq m \leq n/\C$, his time bound  is optimal
+while space occupancy is not. 
+As reported by the above authors, 
+none of these results is practical.
+% and, as we observe, none of these results use
+%only $\mathop{AC}^0$ instructions.
+% (i.e., there is an unbounded boolean
+% circuit of constant depth that implements each of them, so multiplication
+% and parity check are not in $\mathop{AC}^0$.)
+A summary of the known bounds and our new
+results is given in Table~\ref{tab:results}, where our result uses 
+two specialized packed string instructions \wssm\ and \wslm\ which are described later on.
+
+\begin{table}[htb]
+\begin{center}
+   \begin{tabular}{ l l l}
+      ~~~~~ Time    & Space& ~~~~~ Reference \\ \hline
+      $O(\frac{n}{\log_{|\Sigma|} n} + n^\varepsilon m+ \occ)$ & $O(n^\varepsilon m)$ &        Fredriksson~\cite{fredriksson:2002,fredriksson:2003}\\
+      $O(\frac{n}{\log_{|\Sigma|} n} + m + \occ)$ ~~~~~~~   & $O(n^\varepsilon + m)$~~~~~     & Bille~\cite{bille:2011}\\ 
+      $O(\frac{n}{\C} + \frac{n}{m} + m + \occ)$   & $O(m)$     &   Belazzougui~\cite{belazzougui:10}\\
+      $O(\frac{n}{\C}+\frac{m}{\C}+\occ)$ & $O(1)$ & using \wssm\ and \wslm\ \\
+        \end{tabular}
+\end{center}
+\caption{\label{tab:results}Comparison of packed string matching algorithms.}
+\end{table}
+
+%\smallskip
+\paragraph{Our results.}
+We propose an $O(n/\C+m/\C)$ time string matching algorithm (where the
+term $m/\C$ is kept for comparison with the other results) that is
+derived from the elegant Crochemore-Perrin~\cite{cp:91} algorithm.
+The latter algorithm takes linear time, uses only constant auxiliary space, and
+can be implemented in real-time following the recent work by
+Breslauer, Grossi and Mignosi~\cite{bgm:11} -- benefits that are also
+enjoyed in our settings.  The algorithm has an attractive property
+that it compares the text characters only moving forward on two
+wavefronts without ever having to back up, relying on the celebrated
+Critical Factorization Theorem~\cite{cv:78,lothaire-book:83}.
+
+We use  a {\em specialized word-size packed string matching instruction} \wssm\ to
+anchor the pattern in the text
+and continue with bulk character comparisons that match
+the remainder of the pattern.
+Our reliance on a specialized packed string matching
+instruction is not far fetched, given the recent availability of such instructions
+%with remarkable performance 
+in  commodity processors,
+which has been a catalyst for our work.
+Our algorithm is easily adaptable to situations where
+the packed string matching instruction and the bulk character
+comparison instruction operate on different word sizes.
+The output occurrences are compactly provided in a bit-mask that can be spelled
+out as an extensive list of text positions in extra $O(occ)$ time.
+% don't get the page bounaries in this format. control directly.
+%\pagebreak
+
+Unlike the prior theoretical work,
+our solution has a cache-friendly sequential memory access
+without using large external tables or succinct data structures, and
+therefore, can also be efficiently implemented.
+%However, 
+% In the absence of the specialized packed string instructions,
+% we present an efficient emulation using table-lookup and bit-parallelism.
+The same specialized packed string matching instruction could also be used
+in other string matching and string processing algorithms, 
+e.g.~the Knuth-Morris-Pratt algorithm
+\cite[\S 10.3.3]{intel-optimization:11}, 
+but our algorithm has the additional advantages that it
+also works in real-time and
+uses only constant auxiliary space.
+Nonetheless, we expect that algorithms design using non-standard
+specialized instructions and non-standard models of computation is 
+going to continue and evolve into an exploding area of future research, where
+the available instructions and the algorithmic design work will
+cross fertilize.
+%maybe add some references to already existing work?
+
+
+
+\paragraph{Model of computation.}
+We adapt the standard  word-RAM model with $\W$-bit words
+and with only $\mathop{AC}^0$ instructions 
+ (i.e., arithmetic, bitwise and shift operations but no integer multiplication)
+plus two other specialized $\mathop{AC}^0$ instructions. 
+The main word-size packed string matching instruction is
+available in the recent {\em Advanced String Operations} in {\em Intel's
+  Streaming SIMD Extension (SSE4.2) and
+Advanced Vector Extension (AVX) Efficient Accelerated String and Text Processing} 
+instruction set~\cite{intel-sse4:07,intel-avx:11}.
+The other instruction, which is
+only used in the pattern preprocessing, finds the lexicographically
+maximum suffix. We adopt the notation $[d] =\{0,1,\ldots,d-1\}$.
+The two specialized instructions are the following:
+
+\smallskip\noindent{\bf Word-Size String Matching (\wssm)}: find occurrences of
+  one short pattern $x$ that fits in one word (up to $\C$
+  characters) in a text $y$ that fits in two words (up to $2\C-1$
+  characters). The output is a binary word $Z$ of $2\C-1$ bits such that
+  its $i$th bit $Z[i]=1$ iff $y[i .. i+|x|-1] = x$, for $i
+  \in [2\C-1]$. When $i+|x|-1 \geq \C$, this means that only a prefix of
+  $x$ is matched.
+  %Let $s(\W)$ be the complexity in the word-RAM for this problem.
+
+\smallskip\noindent{\bf Word-Size Lexicographically Maximum Suffix (\wslm)}: given
+  a packed string $x$ that fits in one word (up to $\C$ characters),
+  return position $i \in [\C]$ such that $x[i..\C-1]$ is
+  lexicographically maximum among the suffixes in $\{ x[j..\C-1] \mid j
+  \in [\C] \}$.
+  %Let $\ell(\W)$ be the complexity in the word-RAM for this problem.
+
+\paragraph{Specialized instruction emulation.}
+ If these two specialized packed string instructions are not available, then we can
+  emulate them, but our proposed emulations cause a small slowdown 
+  as shown in Table~\ref{tab:results2}.
+While the four Russians' table lookup technique can be used
+ to emulate either of the two specialized instruction, its space use often makes
+ it impractical and limits the packing factor to $\C \leq \log_{|\Sigma|}n$.
+For the \wssm\ instruction, we offer a better
+bit-parallel emulation using the standard word RAM instructions
+that is built upon techniques 
+that were developed for the {\em Parallel Random Access Machine} 
+model~\cite{cggpr:97,vishkin:90}.
+
+\begin{table}[htb]
+\begin{center}
+   \begin{tabular}{ l l l}
+     ~~~~~ Time    & Space& ~~~~~ Emulation \\ \hline
+      $O(\frac{n \log \C}{\C}+\occ)$ & $O(1)$ & bit-parallel \wssm\  no pre-processing\\    
+      $O(\frac{n}{\C}+\C+\occ)$ & $O(\C)$ & bit-parallel \wssm\ pre-processing\\
+      $O(\frac{m}{\log_{|\Sigma|} n})$ & $O(n^\epsilon)$ & four Russian \wslm\ table lookup\\%      $O\left(\frac{n\log \W}{\C}+\frac{m}{\C}+\occ\right)$ & $O(1)$ & This paper
+%      $O\left(\frac{n\log\log \C}{\C}+\frac{m}{\C}+\occ\right)$ & $O(1)$ & This paper     
+%     $O\left(\W + \frac{n \log \log\W}{\C} + \frac{m}{\C} +\occ\right)$ & $O(1)$ & ~~~~~This paper
+    \end{tabular}
+\end{center}
+\caption{\label{tab:results2}Word-RAM emulaton of $\W$-bit \wssm\ and \wslm\ instructions.}
+\end{table}
+
+
+% Specifically, using the ``Four Russians'' technique sacrifices the constant space and the sequential memory access,
+% and limits the packing factor to $\C \leq \log_{|\Sigma|} n$.
+% Alternatively, with the ``bit parallel'' technique we can emulate the main string matching instruction
+% by using integer multiplication (not $\mathop{AC}^0$) for binary convolutions, either
+% limiting the packing factor to $\C\leq \frac{\W}{\log_2|\Sigma|\log \W}$
+% without any pattern preprocessing causing a $\log\W$ slowdown,
+% or limiting the packing factor to $\C\leq\frac{\W}{\log_2|\Sigma|\log\log\C}$ 
+% after an $O(m)$ time pattern preprocessing, causing a $\log\log\C$ slowdown,
+% borrowing techniques from {\em Parallel Random Access Machine algorithms}.
+% %There is no slowdown if extended multiplication, bitwise and shift operations 
+% %can be performed in constant time on inputs as large as $\W\log \W$ bits 
+% %or $\W\log\log\C$ bits, respectively. 
+
+
+In Section~\ref{sec:packed-string-matching}, 
+we start with the reduction 
+of the packed string matching problem using the Crochemore-Perrin algorithm
+ to the two specialized packed string instructions {\wssm\ and \wslm}.
+We then show how to emulate these two specialized packed string instructions
+in the standard RAM model in Section~\ref{sec:word-size-string-matching} and 
+report on some experimental results with the
+\wssm\ instruction on contemporary processors in Section~\ref{sec:hardware}.
+Conclusions and open problems are given in Section~\ref{sec:conclusions}.
+
+
+
+
+
+
+
+\section{Packed String Matching}
+\label{sec:packed-string-matching}
+
+In this section we describe how to solve the {\em packed string
+  matching} problem 
+  using the two specialized word-size string matching instructions \wssm\ and \wslm,
+  and standard word-RAM bulk comparisons of packed strings. 
+
+\comment{
+In this section we describe a reduction from {\em Packed String
+  Matching} to the two string matching problems on word-sized strings.
+We will discuss \wssm\ and \wslm\ in more detail in
+Section~\ref{sec:word-size-string-matching}. Our contribution in this
+section is to show that the complexity of packed string matching in
+the word-RAM reduces to that of \wssm\ and \wslm\ as stated by  the following.}
+
+\begin{theorem}
+  \label{the:main_1}
+  Packed string matching for a length $m$ pattern and a length $n$ text 
+  can be solved in $O( \frac{m}{\C} + \frac{n}{\C}) $
+  time in the word-RAM extended with constant-time \wssm\ and \wslm\
+  instructions. Listing explicitly the $\occ$ text positions of
+  the pattern occurrences takes an additional $O(\occ)$ time.  The
+  algorithm can be made real-time, and uses just $O(1)$ auxiliary
+  words of memory besides the read-only $ \frac{m}{\C} + \frac{n}{\C}$ words
+  that store the input.
+\end{theorem}
+
+The algorithm behind Theorem~\ref{the:main_1} follows the classical
+scheme, in which a text scanning phase is run after the pattern
+preprocessing. In the following, we first present the necessary background
+and then describe how to perform the text scanning phase using \wssm,
+and the pattern preprocessing using \wslm.
+
+\subsection{Background}
+\label{sub:notions-terminology}
+
+\smallskip\noindent{\bf Critical Factorization.} 
+%
+Properties of periodic strings are often used in efficient string
+algorithms.  A string $u$ is {\em a period} of
+a string $x$ if $x$ is a prefix of $u^k$ for some integer~$k$, or
+equivalently if $x$ is a prefix of $ux$.  The shortest period of $x$
+is called {\em the period} of $x$ and its length is denoted by
+$\pi(x)$. A {\em substring} or a {\em factor} of a string $x$ is a
+contiguous block of symbols $u$, such that $x=x'ux''$ for two strings
+$x'$ and $x''$. A {\em factorization} of $x$ is a way to break $x$
+into a number of factors.  We consider factorizations of a
+string $x=uv$ into two factors: a {\em prefix} $u$ and a {\em suffix}
+$v$.  Such a factorization can be represented by a single integer and
+is {\em non-trivial} if neither of the two factors is equal to the
+empty string.
+
+
+Given a factorization $x=uv$,
+a {\em local period} of the factorization is defined
+as a non-empty string $p$ that is consistent with both sides $u$ and
+$v$. Namely, $(i)$~$p$ is a suffix of~$u$ or $u$ is a suffix
+of~$p$, and $(ii)$~$p$ is a prefix of~$v$ or $v$ is a prefix of~$p$.
+The shortest local period of a factorization is called
+{\em the local period} and its length is denoted by $\mu(u,v)$.
+A non-trivial factorization $x=uv$ is called a {\em critical factorization}
+if the local period of the factorization is of the same length
+as the period of $x$, i.e., $\mu(u,v)=\pi(uv)$. See Figure~\ref{crit}.
+
+\begin{figure}[htb]
+\def\C#1{\hbox to 3mm{\hfill{\small{\texttt{#1}}}\hfill}}
+\def\B#1{\hbox to 3mm{\hfill{\small{\textsf{#1}}}\hfill}}
+\def\Sp{\hbox to 3mm{\hfill}}
+\center{\hfill
+\vbox{\hbox{\Sp\C{a}\C{$|$}\C{b}\C{a}\C{a}\C{a}\C{b}\C{a}}
+\hbox{\B{b}\B{a}\Sp\B{b}\B{a}}
+\vskip 1mm\hbox to 27mm{\hfill{(a)}\hfill}}\hskip  1.5cm
+\vbox{\hbox{\Sp\Sp\C{a}\C{b}\C{$|$}\C{a}\C{a}\C{a}\C{b}\C{a}}
+\hbox{\B{a}\B{a}\B{a}\B{b}\Sp\B{a}\B{a}\B{a}\B{b}}
+\vskip 1mm\hbox to 30mm{\hfill{(b)}\hfill}}\hskip 1.5cm
+\hbox{\hfill
+\vbox{\hbox{\C{a}\C{b}\C{a}\C{$|$}\C{a}\C{a}\C{b}\C{a}}
+\hbox{\Sp\Sp\B{a}\Sp\B{a}}\vskip 1mm\hbox to 24mm{\hfill{(c)}\hfill}}\hfill}\hfill
+}
+\caption{\small{The local periods at the first three non-trivial factorizations of
+the string \textsf{abaaaba}.
+In some cases the local period overflows on either side;
+this happens when the local period is longer than either of the two factors.
+The factorization (b) is a critical factorization with local period \textsf{aaab}
+of the same length as the global period \textsf{abaa}.}}
+\label{crit}
+\end{figure}
+
+\smallskip\noindent{\bf Crochemore-Perrin algorithm.}
+%
+%Although critical factorizations may look tricky, they allow for a
+%simplification of the text processing phase of string matching
+%algorithms.  
+We assume that the reader is familiar with the
+Crochemore-Perrin algorithm~\cite{cp:91} and its real-time variation
+Breslauer-Grossi-Mignosi~\cite{bgm:11} and briefly review these algorithms.
+Recall that Crochemore and
+Perrin use Theorem~\ref{critical} to break up the pattern as 
+critical factorization $x=uv$
+with non-empty prefix $u$ and suffix $v$, such that $|u| \leq \pi(x)$.
+
+\begin{theorem}
+\label{critical} (Critical Factorization Theorem,
+Cesari and Vincent~\cite{cv:78,lothaire-book:83})
+Given any $|\pi(x)|-1$ consecutive non-trivial
+factorizations of a string $x$, at least one is critical. % a critical factorization.
+\end{theorem}
+
+%\smallskip
+% Crochemore and Perrin use the following consequence of the critical
+% factorization theorem. %The simple proof is provided for completeness.
+
+Then, they exploit the critical factorization of $x=uv$ by matching the
+longest prefix $z$ of~$v$ against the current text symbols, and using
+Theorem~\ref{cp} whenever a mismatch is found.
+
+\begin{theorem} \label{cp}
+(Crochemore and Perrin~\cite{cp:91})
+Let $x=uv$ be a critical factorization of the pattern and let $p$
+be any local period at this factorization, such that $|p|\leq \max(|u|,|v|)$.
+Then $|p|$ is a multiple of $\pi(x)$, the period length of the pattern.
+\end{theorem}
+
+Precisely, if $z=v$, they show how to declare an occurrence of $x$.
+Otherwise, the symbol following $z$ in $v$ is mismatching when
+compared to the corresponding text symbol, and the pattern $x$ can be
+\emph{safely} shifted by $|z|+1$ positions to the right (there are
+other issues for which we refer the reader to~\cite{cp:91}).
+
+% A string $u$ is {\em a period} of a string $w$ if $w$ is a prefix of $u^k$ for some $k$, or equivalently if
+% $w$ is a prefix of $uw$. The shortest period of $w$ is called {\em the period} of $w$
+% and $w$ is called {\em periodic} if it is at least twice as long as its period.
+% Consider prefixes of the pattern of increasing length.
+% If $u$ is a prefix and $v$ is a longer prefix, the period of $u$ is said to continue in $v$ if $u$ and $v$ have the same period and otherwise the period of $u$ terminates in $v$.
+%  The following Theorem is due to
+% Fine and Wilf~\cite{fw:65}.
+% %The next two lemmas are proved using this theorem.
+% \begin{theorem} \label{Periodicity}
+% If a string $u$ has periods of length $p$ and $q$, and its length $|u| \geq p+q-\gcd (p,q)$, then $u$ also has a period of length $\gcd (p,q)$.
+% \end{theorem}
+
+% \begin{corollary}
+% restrict text length to one and half pattern length.
+% all occurrences align in arithmetic progression.
+% \end{corollary}
+
+
+To simplify the matter in the rest of the paper, we discuss how to
+match the pattern suffix~$v$ assuming without loss of generality that
+$|u| \leq |v|$. Indeed, if $|u|> |v|$, the
+Crochemore-Perrin approach can be simplified as shown in~\cite{bgm:11}: use
+two critical factorizations, $x=uv$ and $x'=u'v'$, for a prefix $x'$
+of $x$ such that $|x'| > |u|$ and $|u'| \leq |v'|$. In this way,
+matching both $u'$ and $v'$ suitably displaced by $|x|-|x'|$ positions
+from matching~$v$, guarantees that $x$ occurs.  This fact enables us
+to focus on matching $v$ and $v'$, since the cost of matching $u'$ is
+always dominated by the cost of matching $v'$, and we do not need to
+match~$u$. For the sake of discussion, it suffices to consider only one instance,
+namely, suffix $v$. % since dealing with $v'$ follows the same approach.
+
+We now give more details on the text processing phase, assuming that
+the pattern preprocessing phase has correctly found the critical
+factorization of the pattern $x$ and its period $\pi(x)$, and any
+additional pattern preprocessing that may be required (Section~\ref{sub:prepro}).
+
+While other algorithms may be used with the \wssm\ instruction,
+the Crochemore-Perrin algorithm is particularly attractive because
+of its simple text processing. % that only moves forward.
+Therefore, it is convenient to assume that the period length and critical
+factorization are exactly computed in the pattern preprocessing
+burying the less elegant parts in that phase.
+
+
+\subsection{Text processing}
+\label{sub:text-processing}
+
+The text processing has 
+complementary parts that % separately 
+handle short patterns and long patterns.
+%Observe that in each case, we
+%need \wssm\ to repeatedly match only one specific substring of the
+%pattern that fits into one word. Also, in the latter case, we can
+%successfully match as many as $\C$ symbol in the pattern at the same
+%time, since the latter are packed in a word.
+A pattern $x$ is {\em short} if its length is at most $\C$,
+namely, the packed pattern fits into a single  word,
+and is {\em long} otherwise.
+Processing short patterns is immediate with \wssm\
+and, as we shall see, the search for long patterns 
+reduces to that for short patterns. % plus bulk comparisons.
+
+\smallskip\noindent{\bf Short patterns.} \label{veryshort}
+%
+When the pattern is already short, \wssm\ is repeatedly used to directly find all 
+occurrences of the pattern in the text.
+
+\begin{lemma}
+\label{lemma:veryshort}
+There exists an algorithm that finds all occurrences of a short pattern
+of length $m\leq \C$ in a text of length $n$ in $O\!\left(\frac{n}{\C}\right)$ time 
+using $O(1)$ auxiliary space.
+\end{lemma}
+
+\begin{proof}
+Consider the packed text blocks of length $\C+m-1$ that start on word boundaries, 
+where each block overlaps the last $m-1$ characters of the previous block
+and the last block might be shorter.
+Each occurrence of the pattern in the 
+text is contained in exactly one such block. 
+Repeatedly use the \wssm\ instruction to search for the pattern 
+of length $m\leq \C$ in these text blocks
+whose length is at most $\C+m-1\leq 2\C-1$. 
+\end{proof}
+
+
+\smallskip\noindent{\bf Long patterns.}\label{long}
+%
+Let $x$ be a long pattern of length $m> \C$: 
+occurrences of the pattern in the text must always be spaced
+at least the period $\pi(x)$ locations apart.
+We first consider the easier case where the pattern has a long period,
+namely $m \geq \pi(x) > \C$, and so there is at most one occurrence 
+starting within each word.
+
+\begin{lemma}
+\label{lemma:longer1}
+There exists an algorithm that finds all occurrences of a long-period
+long pattern of length $m \geq \pi(x) \geq \C$, 
+in a text of length $n$ in $O\!\left(\frac{n}{\C}\right)$ time 
+using $O(1)$ auxiliary space.
+\end{lemma}
+
+\begin{proof}
+The Crochemore-Perrin algorithm can be naturally implemented using the 
+\wssm\ instruction and bulk character comparisons.
+Given the critical factorization $x=uv$, 
+the algorithm repeatedly searches using \wssm\ for an occurrence of
+a prefix of $v$ of length $\min(|v|,\C)$
+starting in each packed word aligned with $v$, until such
+an occurrence is discovered.
+If more than one occurrence is found starting within the same
+word, then by Lemma \ref{cp}, only the first such occurrence is of
+interest. %\rem{WHY????}
+%
+The algorithm then uses the occurrence of the prefix of~$v$ to anchor
+the pattern within the text and continues to compare
+the rest of $v$ with the aligned text  and then compares the
+pattern prefix $u$, both using bulk comparison
+of words containing $\C$ packed characters.
+Bulk comparisons are done by comparing words; in case of a mismatch
+the mismatch position can be identified using bitwise \xor\ operation, and then
+finding the most significant set bit.
+
+A mismatch during the attempt to verify the suffix $v$ allows
+the algorithm to shift the pattern ahead until $v$ is aligned with the text
+after the mismatch. A mismatch during the attempt to verify
+$u$, or after successfully matching $u$,
+causes the algorithm to shift the pattern ahead by $\pi(x)$ location. 
+In either case the time adds up to only $O\!\left(\frac{n}{\C}\right)$.
+\end{proof}
+
+\comment{
+
+We employ the critical
+factorization of $x=uv$, for non-empty prefix $u$ and suffix $v$, and
+$|u| \leq \pi(x)$. We recall that the desirable property of the Crochemore-Perrin algorithm is that it
+ only moves forward while matching the
+suffix $v$, that is, upon the first mismatch the algorithm may skip
+any prefix $z$ of $v$ that was matched to the corresponding parts of
+the text.  If $v$ is fully matched, then the algorithm attempts to
+match the prefix $u$ and reports occurrences of the pattern upon
+success, but regardless of the success or failure in matching~$u$, the
+algorithm can move ahead by $\pi(x)$ locations. The implementation in the word-RAM is quite
+straightforward: just observe that the comparisons of the text symbols
+matching the suffix $v$ (resp., the prefix $u$) can be done in bulk by
+reading a word of $\C$ characters at a time. In case of mismatch, its position can be
+identified using the \xor\ bitwise operation and, then, 
+the most significant bit operation.
+%
+As previously mentioned in Section~\ref{sub:notions-terminology}, it
+is shown in~\cite{bgm:11} how to guarantee that the cost of matching
+$u$ is always dominated by the cost of matching~$v$, so we can focus
+on matching $v$. After all of $v$ is verified,
+whether $u$ is matched or not, the next pattern occurrence candidate
+is moved ahead by $\pi(x)>\C$ locations, and we continue from the
+current text position without any need to backtrack.
+
+
+% Our algorithm uses the \wssm\ instruction to find all occurrences of % $v'$ in the given text substring of length $2\C-1$.
+% By Theorem \ref{cp}, if there are two or more occurrences of $v'$, % then the differences between them must be a multiple of $\pi(w)$.  % Create a bit mask $\pi(x)$
+% The Crochemore-Perrin algorithm can be implemented in
+% $O(n/\C)$ time, if $\C<\pi(x)\leq m$.
+% Let $(u,v)$ be the critical factorization of the pattern and
+% let $v'$ be a prefix of $v$ of length $\min(|v|,\C)$.
+
+
+We implement the above scheme as follows. We split the text into
+$O(n/\C)$ overlapping substrings of length $2\C-1$, where each of the
+latter fits into two consecutive words. Let $\pi'$ be the period of
+the prefix of $v$ having length $\min(|v|,\C)$, and let $v'$ be the
+longest prefix of~$v$ having period $\pi'$, where $\pi' \leq \C$ by
+definition. Now, if $v' = v$, we can find the occurrences of $v$ (the
+wanted goal) by Lemma~\ref{lemma:veryshort} or
+Lemma~\ref{lemma:longer2} applied to the ``pattern'' $v$ and its
+period $\pi'$.
+
+Instead, suppose that $v'$ is a proper prefix of $v$. We use two types
+of steps: one using~$v'$ to anchor a potential occurrence of $v$, and
+the other is doing block compares and run ahead in $v$. First, our
+algorithm attempts to find an occurrence candidate by searching for
+$v'$ in the current text substring $t$, using
+Lemma~\ref{lemma:longer2} on $v'$ (since $|v'| \geq \C$) and its
+period $\pi'$ (since $\pi' \leq \C$).  Second, if there are one or two
+occurrences of $v'$ in $t$, we extend each of the two by comparing
+$\C$ characters at a time to verify whether $v$ occurs or not.  If a
+mismatch is found while comparing~$v$, we can skip the pattern
+occurrence candidates ahead (by at least $\C$ positions) until after the mismatch.  Instead, if
+three or more occurrences of $v'$ have matching substrings completely
+inside $t$, let $l$ be the leftmost occurrence in $t$ and $r$ be the
+rightmost occurrence in $t$ of $v'$. Observe that $r-l$ is multiple of
+$\pi'$ and all the occurrences have starting positions $i$ that are
+equally spaced apart by $\pi'$ inside $t$, namely, $l \leq i \leq r$
+and $i-l$ (or, equivalently $r-i$) is a multiple of $\pi'$. (Recall
+that these occurrences are found using Lemma~\ref{lemma:longer2}.)
+Try to extend the occurrence of $v'$ at position $l$. If $v$ also
+occurs, we shift by the period $\pi(x)$. Otherwise, let $z$ be the
+longest matched prefix of $v$: note that $|z| \geq |v'| \geq \C$, so
+we shift by $|z|+1> \C$ positions. Since all the occurrences of $v'$
+in $t$ form an arithmetic progression, it is not difficult to find the
+next candidate $i > l+|z|+1$ by simple arithmetics. We repeat on $i$
+the same check for~$v$ and so on. Note that this situation repeats
+only $O(1)$ times for a given text substring of length $2 \C -1$,
+since each shift skips at least $\C$ characters. 
+
+
+\begin{remark}
+  When $\pi(x) \geq m/2$ in Lemma~\ref{lemma:longer1} (where $\pi(x) >
+  \C$ and so $m > \C$), we follow the variant in~\cite{cp:91}: when we
+  have to shift $v$ by $\pi(x)$ positions, we actually shift it only
+  by $m/2$ positions as if matched a prefix $z$ of $v$ having length
+  $|z|=m/2$. In this way, we still find correctly all the occurrences
+  but we increase the cost by an additive $O(\frac{n}{\C})$ term,
+  which does not change the final cost: indeed, the shift by $m/2$
+  positions may occur $O(n/m)$ times, and each time we pay $O(m/\C)$,
+  which gives the claimed extra cost.
+\end{remark}
+}
+
+When the period of the pattern is shorter than the word size, that is $\pi(x)\leq \C$,
+there may be several occurrences of the pattern starting within each word.
+The algorithm is very similar to the long period algorithm above,
+but with special care to efficiently 
+manipulate the bit-masks representing all the occurrences.
+
+\begin{lemma}
+\label{lemma:longer2}
+There exists an algorithm that finds all occurrences of a short-period
+long pattern of length $m$,
+such that  $m>\C> \pi(x)$, 
+in a text of length $n$ in $O\!\left(\frac{n}{\C}\right)$ time 
+using $O(1)$ auxiliary space.
+\end{lemma}
+
+\begin{proof}
+Let $p$ be the prefix of $x$ of
+length $\pi(x)$, and write $x=p^r p'$, where $p'$ is a prefix
+of~$p$. If we can find the maximal runs of consecutive $p$s inside
+the text, then it is easy to locate the occurrences of $x$. To this
+end, let $k \leq r$ be the maximum positive integer such that $k \cdot
+\pi(x) \leq \C$ while $(k+1) \cdot \pi(x) > \C$. Note that there cannot exist two occurrences of $p^k$ that are completely inside the same word.
+
+We examine one word $w$ of the text at a time while maintaining the
+current run of consecutive $p$s spanning the text word $w'$ preceding
+$w$. We apply \wssm\ to~$p^k$ and~$w'w$, and take the rightmost
+occurrence of~$p^k$ whose matching substring is completely inside
+$w'w$. We have two cases: either that occurrence exists and is aligned
+with the current run of $p$s, and so we extend it, or we close the
+current run and check whether $p$' occurs soon after.  The latter case
+arises when there is no such an occurrence of $p^k$, or it exists but
+is not aligned with the current run of $p$s.
+%
+Once all the maximal runs of consecutive occurrences of $p$s are found
+(some of them are terminated by $p'$) for the current word $w$, we can 
+decide by simple arithmetics whether $x = p^r p'$ occurs on the fly. 
+\end{proof}
+
+
+\smallskip\noindent{\bf Real-time algorithm.}
+\label{real}
+As mentioned in Section~\ref{sub:notions-terminology},
+the Crochemore-Perrin algorithm can be implemented in
+real time using two instances of the basic algorithm with carefully
+chosen critical factorizations~\cite{bgm:11}. Since we are following the same scheme
+here, our algorithm reports the output bit-mask of pattern occurrences
+ending in each text word in $O(1)$ time after reading the word.
+Thus, we can obtain a real-time version as claimed in Theorem~\ref{the:main_1}.
+
+
+\subsection{Pattern preprocessing}
+\label{sub:prepro}
+
+Given the pattern $x$, the pattern preprocessing of Crochemore-Perrin
+produces the period length $\pi(x)$ and a critical factorization
+$x=uv$ (Section~\ref{sub:notions-terminology}): for the latter, they
+show that $v$ is the lexicographically maximum suffix in the pattern
+under either the regular alphabet order or its inverse order, and use
+the algorithm by Duval~\cite{du:83}.  The pattern preprocessing of
+Breslauer, Grossi and Mignosi~\cite{bgm:11} uses Crochemore-Perrin
+preprocessing, and it also requires to find the prefix $x'$ of $x$
+such that $|x'|> |u|$ and its critical factorization $x'=u'v'$ where
+$|u'| \leq |v'|$.
+%
+Our pattern preprocessing requires to
+find the period $\pi'$ for the first $\C$ characters in $v$ (resp.,
+those in $v'$), along with the longest prefix of $v$ (resp., $v'$)
+having that period. 
+% NOT NEEDED ANYMORE, BUT LET'S KEEP IT FOR NOW
+% Note that, since $\pi' \leq \C$, we can easily locate the longest
+% prefix by applying \wssm\ on $v$ and using the first $\pi'$ characters
+% in $v$ as a pattern.
+We thus end up with only the following two problems:
+\begin{enumerate}
+\item Given a string $x$, find its lexicographically maximum suffix
+  $v$ (under the regular alphabet order or its inverse order).
+\item Given a string $x = uv$, find its period $\pi(x)$ and the period
+  of a prefix of $v$.
+\end{enumerate}
+
+When $m = O(\frac{n}{\C})$, which is probably the case in many
+situations, we can simply run the above algorithms in $O(m)$ time to
+solve the above two problems. We focus here on the case when $m =
+\Omega(\frac{n}{\C})$, for which we need to give a bound of
+$O(\frac{m}{\C})$ time.
+
+
+\begin{lemma}
+  \label{lem:maxsuff}
+  Given a string $x$ of length $m$, its lexicographically maximum
+  suffix $v$ can be found in $O(\frac{m}{\C})$ time.
+\end{lemma}
+\begin{proof}
+  Duval's algorithm~\cite{du:83} is an elegant and simple linear-time
+  algorithm that can be easily adapted to find the lexicographically
+  maximum suffix. It maintains two positions $i$ and~$j$, one for the
+  currently best suffix and the other for the current
+  candidate. Whenever there is a mismatch after matching $k$
+  characters ($x[i+k] \neq x[j+k]$), one position is ``defeated'' and
+  the next candidate is taken. Its implementation in word-RAM is quite
+  straightforward, by comparing $\C$ characters at a time, except when
+  the interval $[\min(i,j), \max(i,j)+k]$ contains less than $\C$
+  positions, and so everything stays in a single word: in this case,
+  we can potentially perform $O(\C)$ operations for the $O(\C)$
+  characters (contrarily to the rest, where we perform $O(1)$
+  operations).
+  % 
+  We show how to deal with this situation in $O(1)$ time.
+  We employ \wslm, and let $w$ be the suffix thus
+  identified in the word. We set $i$ to the position of $w$ in the
+  original string $x$, and $j$ to the first occurrence of $w$ in $x$
+  \emph{after} position $i$ (using \wssm). If $j$ does not exist, we
+  return $i$ as the position of the lexicographically maximum suffix;
+  otherwise, we set $k = |w|$ and continue by preserving the invariant
+  of Duval's algorithm.  
+\end{proof}
+% After that, the techniques used are simple and borrowed from
+%~\cite{ac:91,dis:94,du:83,is-canonical:92}.
+
+
+\comment{
+  %%% Danny, you changed the proof of Lemma 5 and now the following
+  %%% lemma is not useful --- Roberto
+\begin{lemma}
+  \label{lem:period}
+  Given a string $x=uv$ of length $m$, its period $\pi(x)$ and the period
+  $\pi'$ of a prefix of $v$ and its longest extension $v'$ inside $v$ can both be
+  found in $O(\frac{m}{\C})$ time. When $\pi(x) \geq m/2$ and $\pi(x)
+  > \C$, we simply report this event without computing $\pi(x)$.
+\end{lemma}
+\begin{proof}
+  We first discuss how to find the period $\pi'$ and the prefix $v'$
+  of $v$ as needed in the proof of Lemma~\ref{lemma:longer1}. Let
+  $v''$ be the prefix of $v'$ (and so of $v$) of length $\C$. Note
+  that \wssm\ solves the following \emph{longest prefix-suffix}
+  problem in $O(1)$ time as a byproduct: given two strings $z$ and $w$
+  of at most $\C$ characters, find the longest prefix of $z$ that
+  matches a suffix of $w$.  We apply this problem to $z=v''$ and $w$
+  equal to the second suffix of $v''$: we obtain $\pi'$, which is
+  $|v''|$ minus the length of the returned suffix. Next, we compare
+  the characters \emph{following} $v''$ with those \emph{displaced}
+  $\pi'$ positions before them. Comparisons are performed with $\C$
+  characters at a time. When a mismatch is found, we know where $v'$
+  ends with $O(1)$ bitwise operations. The total time is
+  $O(\frac{m}{\C})$ as required.
+
+
+  We now discuss how to find $\pi(x)$.  We use again \wssm\ where the
+  pattern is formed by the first $\C$ characters of $x$ and the text
+  by the first $2\C-1$ characters of the second suffix of~$x$. At this
+  point, we take the leftmost occurrence $p$ among the first $\C$
+  positions. We check for a run of equal $p$-long substrings that are
+  spaced $p$ positions each other in $x$, starting from the first
+  position in $x$. If we have that all the positions in $x$ that are
+  multiple of $p$ have occurrences, we know that $\pi(x) \leq \C$;
+  otherwise, it is surely $\pi(x) > \C$.
+
+  If $\pi(x) \leq \C$, the leftmost occurrence of the first execution
+  of \wssm\ (the one that found~$p$) will occur at position $\pi(x)+1$
+  of $x$. Thus we compute $\pi(x)$ by simple arithmetics.
+
+  If $\pi(x) > \C$, we first compute the period of $v$. Observe that
+  the critical factorization $x=uv$ is such that $v$ is
+  lexicographically maximum. We mimic Rytter's linear-time code
+  from~\cite{Rytter03a}, which finds the period for a string $v$ that
+  is \emph{self-maximal}, that is, lexicographically maximum among its
+  suffixes (as is in our case). This code is reported in
+  Appendix~\ref{app:rytter-algorithm} and can implemented in 
+  $O(\frac{m}{\C})$ time as required.
+
+  Now, if $|u| < |v|$, then the period of $v$ is the local period of
+  the critical factorization $x=uv$, which is the period $\pi(x)$ by
+  definition (see~\cite{cp:91}). If $|u| \geq |v|$, we search for $v$
+  in $u$ as in Section~\ref{sub:text-processing} since we have all the
+  needed information for the pattern $v$ (e.g.\mbox{} its period). If
+  $v$ occurs in $u$, we take its rightmost occurrence in $u$ say, at
+  position $i$, and have $\pi(x) = |u|-i+1$. If $v$ does not occur in
+  $u$, we observe that the local period of $x=uv$ is at least $m/2$,
+  and so $\pi(x) \geq m/2$. Since we are dealing with the case $\pi(x)
+  > \C$, we are in the situation depicted in the Remarks after
+  Lemma~\ref{lemma:longer1} and do not need to output $\pi(x)$. 
+\end{proof}
+}
+
+\begin{lemma}
+  \label{lem:pat_pre}
+  The  preprocessing of a pattern of length $m$ takes $O(\frac{m}{\C})$ time.
+\end{lemma}
+
+
+
+
+
+
+
+
+\section{Word-Size Instruction Emulation}
+\label{sec:word-size-string-matching}
+
+Our algorithm %in Section~\ref{sec:packed-string-matching} 
+uses two specialized word-size packed string matching instructions, \wssm\ and \wslm,
+that are assumed to take $O(1)$ time. 
+In the circuit complexity sense
+both are $\mathop{AC}^0$ instructions,
+which are easier than integer multiplication
+that is not $\mathop{AC}^0$, since integer multiplication 
+can be used to compute the parity~\cite{fss:84}.
+Recall that the class $\mathop{AC}^0$ consist of problems that
+  admit polynomial size circuits of depth $O(1)$, with Boolean
+  \texttt{and}/\texttt{or} gates of unbounded fan-in and \texttt{not}
+  gates only at the inputs.
+
+\comment{ This proposition is stated above
+\begin{lemma}
+  \label{lemma:ac0}
+  The $\W$-bit \wssm\ and \wslm\ problems
+  belong to $\mathop{AC}^0$, the class of problems which
+  admit circuits of depth $O(1)$ and polynomial size, with
+  \texttt{and}/\texttt{or} gates of unbounded fan-in and \texttt{not}
+  gates only at the inputs.
+\end{lemma}
+}
+
+% The main \wssm\ instruction is repeatedly used in the text
+% processing, and solves the string matching problem on word-size packed
+% strings.  
+
+
+% The other \wslm\ instruction is only used in the pattern preprocessing
+% to find the lexicographically maximum suffix of a word-size packed
+% string when $m = \omega(\frac{n}{\C})$, which occurs when either the
+% pattern is very large or the text is very small.  This operation is
+% apparently not available in contemporary commercial hardware, but
+% could be implemented in specialized hardware if compelling
+% justification arises.  This instruction, however, is probably harder
+% to implement; in the parallel random access machine model the problem
+% takes more time than string matching~\cite{ac:91,dis:94,is-canonical:92}.
+
+
+While either instruction can be emulated using the four
+Russians' technique, table lookup limits the packing factor and
+has limited practical value for two reasons:
+it sacrifices the constant auxiliary space
+and has no more cache friendly access.  
+We focus here on the easier and more useful main instruction \wssm\ 
+and propose efficient bit parallel emulations in the word-RAM, relying on integer
+multiplication for fast Boolean convolutions. % (even though \wssm\ is $\mathop{AC}^0$).  
+
+\begin{lemma}
+  \label{lemma:instruction_simulation}
+  After a preprocessing of $O(\W)$ time, the $\W/\log\log W$-bit {\rm \wssm} and
+  {\rm \wslm} instructions can be emulated in $O(1)$ time
+  on a $\W$-bit word RAM.
+\end{lemma}
+
+% The first \wssm\ emulation requires operations on
+% $\W\log \W$ bit words, but no special pattern preprocessing.
+% Using Vishkin's~\cite{vishkin:90} deterministic
+% samples, that were developed for the parallel random access
+% machine model,  we also offer a second \wssm\ emulation that 
+% requires operations on shorter $\W\log\log \C$ bit words,
+% after an $O(\W)$ time pattern preprocessing.
+% In our algorithm, the \wssm\ instruction is always
+% used to search for the same pattern and therefore, the
+% pattern preprocessing is only done once.  
+% If only $\W$ bit instructions are available, then we limit the character packing
+% factor to get a $\log \W$ or a $\log\log \C$ slowdown, respectively.
+
+\comment{In Section~\ref{sec:hardware}, we perform a practical study on current
+hardware platforms to show that the \wssm\ has low latency (2 machine
+cycles). It can be therefore employed in practice as a basic block for
+building efficient packed string matching software tools.}
+
+\subsection{Bit-parallel emulation of \wssm\ }
+\label{sub:details-bit-parallel-emulation}
+
+String matching problems under {\em general matching relations} were
+classified in~\cite{mp:94,mr:95} into easy and hard problems, where
+easy problems are equivalent to string matching and are solvable in
+$O(n+m)$ time, and hard problems are at least as hard as one or more
+Boolean convolutions, that are %usually 
+solved using $\mathop{FFT}$ and
+integer convolutions in $O(n\log m)$ time~\cite{ahu-book:74,fp:74}.  To efficiently
+emulate the \wssm\ instruction we introduce {\em two layers} of increased complexity: 
+first, we observe that the %vanilla string matching 
+problem can also be solved using Boolean convolutions, and then, we use the
+powerful, yet standard, integer multiplication operation, that
+resembles integer convolutions, to emulate Boolean convolutions.  
+In the circuit complexity sense Boolean convolution is $\mathop{AC}^0$,
+and therefore, is easier than integer multiplication.
+  
+
+ % \rem{Double check and maybe add a few more words.
+ % There are algorithm, look up references, that do convolution on
+ % vectors with small number of set bits. Might help especially in the second case.}
+
+\paragraph{\bf String matching and boolean convolution via
+  integer multiplication.} 
+%
+Consider the text  $t= t_{0}\cdots t_{n-1}$ and the pattern $p= p_{0}\cdots
+p_{m-1}$ where  $p_i,t_i \in \Sigma$. Our goal is to compute the occurrence vector of $p$ in $t$. This is  a vector 
+$c$
+so that $c_k=1$ iff $t_{k+i}
+= p_{i}$ for all $i \in [m]$. 
+
+Since each
+character is encoded in $\log_2 |\Sigma|$ bits, we 
+view $t$ and $p$ as {\em binary}  vectors of length $n \log_2 |\Sigma|$  and $m \log_2 |\Sigma|$ respectively. In the occurrence vector $c$ we will then only  consider positions $k=0,\log_2 |\Sigma|, \log_2 |\Sigma|,\ldots $ (all the other positions correspond to partial characters and will be discarded).
+In general, we have
+\begin{eqnarray*}
+c_k  = \bigwedge_{i=0,\ldots,m-1}\!\!\!\!\!\!\! (t_{k+i} = p_i)= 
+\overline{\left(\bigvee_{i=0,\ldots,m-1} \!\!\!\!\!\!\! (t_{k+i} \wedge \overline{p_i})\right)\vee
+\left(\bigvee_{i=0,\ldots,m-1}\!\!\!\!\!\!\!  (\overline{t_{k+i}} \wedge p_i )\right)}.
+\end{eqnarray*}
+Define the {\em convolution operator}
+$a \star b $ for  binary
+vectors $a=a_{0}\cdots a_{n-1}$ and $b=b_{0}\cdots b_{m-1}$ to be
+\begin{eqnarray*}
+(a \star b)_k = \!\!\!\!\!\! \bigvee_{i=0,\ldots,\min\{m-1,n-k-1\}}\!\!\!\!\!\!\!\!\! (a_{i+k} \wedge b_{i}).
+\end{eqnarray*}
+
+The occurrence vector $c$ can then be computed by taking the $n$ least 
+significant bits from $
+\overline{{(t \star \overline{p})}\vee
+  {(\overline{t}\star p)}}$. This is illustrated in Figure~\ref{fig:convint}.
+We now explain how to compute $t \star \overline{p}$, computing $\overline{t}\star p$ is done similarly. 
+
+Notice that $(t \star \overline{p})_k =1$ iff 
+aligning the pattern $p$ to the text $t$ starting at position $k$ has {\em at least one}  mismatch location where $t$ has a 1 and $p$ has a 0. We will instead require that $(t \star \overline{p})_k = x$ iff there are {\em exactly} $x$  such  mismatches. This way, we can compute
+$t \star \overline{p}$ using standard integer multiplication $t \times \overline{p}$. This is because with the left shift operator $\ll$ we have:
+\begin{eqnarray*}
+t \star \overline{p}  \,= \bigvee_{i=0,\ldots,\min\{m-1,n-k-1\} } [(t \ll i) \times
+\overline{p}_i] \,=\, t \times \overline{p}.
+\end{eqnarray*}
+
+%\begin{eqnarray*}
+%a \star b \,=  \bigvee_{i=0,\ldots,m-1} [(a \ll i) \times
+%b_i] \,=\, a \times b.
+%\end{eqnarray*}
+%
+%and the left shift operator $\ll$, but the sum has to be replaced by the OR operation:
+% \rem{The notation has to be fixed because $m$ is part of the operator- I think
+% it suffices to fix the bitwise complement operator to stay within the word limit
+% by masking.}
+
+The only problem with this method is that the number of mismatches $x$ might be as large as $m$. To account for this, 
+we pad each digit of $t$ and $\overline p$ with $L=\lceil \log m
+\rceil$ zeros,
+and think of each group of $L$ bits as a {\em field}. Since we are adding up
+at most $m$ numbers the fields would not overflow.  Thus, performing
+the integer multiplication on the padded strings gives fields with
+value $x$ when the number
+of mismatches is $x$.  
+
+
+Adding the two convolutions $t \star \overline{p}$  and $\overline t \star {p}$ together, we get the
+overall number of mismatches, and we need to identify the fields with value 0 (these correspond to occurrences, i.e., no mismatches). In other
+words, if we use padded vectors $t', \overline{t'}, p'$, and 
+$\overline{p'}$, we can compute $r = {(t' \times \overline{p'})} +
+{(\overline{t'}\times p')}$ and set ${c}_k = 0$ if and only if the
+the corresponding field in $r$ is non-zero.
+
+
+We use the constant time word-RAM bit techniques in Fich~\cite{faith}
+to pad and compact.  Note that in each field with value $f$ we have
+that $0-f$ is either 0, or borrows from the next field 1s on the left
+side.  Take a mask with 1 in each field at the least significant bit,
+and subtract our integer $r$ from this mask.  We get that only zero
+fields have 0 in their most significant bit.  Next, Boolean AND with the
+mask to keep the most significant bit in each field. Finally,  shift right
+to the least significant bit in the field. 
+
+ %A small example is shown in Figure~\ref{fig:convint}.
+
+\definecolor{Gray}{gray}{0.7}
+
+\begin{figure}[htb]
+  Padding the pattern $101$ and the text $01101010$ (padding bits are in gray) we get that:
+  $$p=\textcolor{Gray}{0} 1\textcolor{Gray}{0}0\textcolor{Gray}{0}1, t=\textcolor{Gray}{0}0\textcolor{Gray}{0}1\textcolor{Gray}{0}1\textcolor{Gray}{0}0\textcolor{Gray}{0}1\textcolor{Gray}{0}0\textcolor{Gray}{0}1\textcolor{Gray}{0}0$$
+  $$\overline p=\textcolor{Gray}{0} 0\textcolor{Gray}{0}1\textcolor{Gray}{0}0, \overline t=\textcolor{Gray}{0}1\textcolor{Gray}{0}0\textcolor{Gray}{0}0\textcolor{Gray}{0}1\textcolor{Gray}{0}0\textcolor{Gray}{0}1\textcolor{Gray}{0}0\textcolor{Gray}{0}1$$
+ Doing standard integer multiplication on these vectors we get that:
+ $$p \times \overline t = 1000101001000100001$$
+ $$\overline p \times t = 0000101000100010000$$
+ Adding these we get the mismatch vector:\\
+  $$(p \times \overline t) + (\overline p \times t) =  1\ 00\ 10\ 10\ 00\ 11\ 00\ 11\ 00\ 01$$
+ Replacing each field (two bits) by the number it holds gives:
+   $$(p \times \overline t) + (\overline p \times t) =  1 0 2 2 0 3 0 3 0 1$$
+   Taking the $n=8$ least significant bits gives the mismatch vector
+   $2 2 0 3 0 3 0 1$.
+
+  \caption{\label{fig:convint} An example of searching for the pattern $p=101$ of length $m=3$ in the text $t=01101010$ of length $n=8$. The mismatch vector is $2 2 0 3 0 3 0 1$. i.e., aligning $p$ to $t$ at position 0 gives two mismatches, at position 1 also gives two mismatches, at position 2 there are no mismatches (this is an occurrence) etc.}
+\end{figure}
+
+
+ The only caveat in the
+above ``string matching via integer multiplication'' is its need for
+padding, thus extending the involved vectors by a factor of $L =
+\Theta(\log m) = O(\log w)$. We
+now have to use $L$ machine words which incurs a slowdown of $\Omega(L)$.
+We next show how to reduce the required padding from $L$ to $\log\log
+\alpha$.% bits.
+\comment{ We next show that it suffices to use only $O(\log L)$ words
+  and change the slowdown to $O(\log L)=O(\log \log \W)$. This
+  requires the use of deterministic sampling.}
+  
+\paragraph{\bf Sparse convolutions via deterministic samples.}
+%  Or Maybe new method with constant time text processing
+%
+A {\em deterministic sample ($DS$)} for a pattern with period length
+$\pi$ is a collection of at most $\lceil\log \pi\rceil$ pattern
+positions, such that any two occurrence candidate text locations that
+match the pattern at the $DS$ must be at least $\pi$ locations
+apart~\cite{vishkin:90}.  To see that a $DS$ exists, take $\pi$
+consecutive occurrence candidates. % of the pattern.
+Any two % shifted
+candidates must have at least one mismatch position; add one such
+position to the $DS$ and keep only the remaining minority candidates,
+removing at least half of the remaining candidates.  After at most
+$\lceil \log \pi\rceil$ iterations, there remains only one candidate
+and its $DS$.  Moreover, if the input characters are expanded into
+$\log_2 |\Sigma|$ bits, then the $DS$ specifies only $\lceil \log
+\pi\rceil$ bits, rather than characters.
+%, and permits only occurrence candidate that are
+%$\pi \log_2 |\Sigma|$ bits apart. 
+%For simplicity we assume the alphabet $\Sigma$ is binary.
+%
+Candidates can be eliminated % ``sparsified" 
+via Boolean convolutions with the two bit vectors
+representing the $0$s and $1$s in the $DS$, 
+that is, sparse Boolean vectors with at most $\lceil \log\pi \rceil$ set bits.
+The period $\pi$, the $DS$, and the other required masks and indices
+are precomputed in $O(\W)$ time.
+
+Consider now how we performed string matching via integer
+multiplication in the previous paragraph.  Then, the padding in the
+bitwise convolution construction can be now reduced to only $L'=\lceil
+\log\log \pi+1\rceil $ bits instead of $L$ bits, leading to
+convolutions of shorter $O(\W\log\log\pi) = O(\W\log\log\W)$ bit words
+and slowdown of only $O(\log\log\W)$ time. Using $\W$-bit words and
+$O(\W)$-time preprocessing, we can treat $O(\W/\log\log\W)$ bits in
+$O(1)$ time using multiplication, thus proving
+Lemma~\ref{lemma:instruction_simulation}.
+
+
+
+\comment{Our approach requires to ``sparsify" the  
+occurrence candidates remaining
+after the convolutions with the $DS$ by
+eliminating those that are not sufficiently far apart, leaving only candidates
+that are at least $\pi$ characters apart,
+then verify the remaining candidates against the pattern's period, 
+and then count consecurive periodic runs in case of highly periodic patterns,
+all are operations that can be done in $O(1)$ time using bitwise 
+and arithmetic operations and standard string matching techniques.
+
+Explain how to sparsify, how to verify, and how to count.
+
+To do that, we first assume that the pattern is aperiodic, namely, that $\pi\ge m/2$. This way, we can use the fact that text locations matching the pattern must be $\pi$ locations away. We take a bit
+mask $M$ with $1$s every $\pi$ positions and subtract our number from
+this.  The highest $1$ bit in each block borrows from the nearest 1 in
+the mask that turned zero. After clearing the mask, we are left with
+the highest one in each block. We then shift by $\pi$ and subtract and
+remove bits if too close by. Finally,  we multiply the pattern by mask $M$ and perform \xor\ with the text.  To obtain the occurrences, we check blocks for differences and keep only those without.
+
+
+
+%Try to implement this in benchmark section.
+
+%For example, in the string
+%0111001101100110 0110, 
+%deterministic sample checking 0xxx eliminates xx1x and x1xx.
+%
+%
+
+\smallskip\noindent{\bf Periodic Patterns via Aperiodic Patterns.}
+%\rem{I now think there is a problem here. Have to fix.}
+
+We have seen how to search for aperiodic patterns. We now show how to search for periodic patterns (i.e., $u^kv$ for $k \geq 2$ and
+$v=$ prefix of $u$) by showing that it is enough to search for
+$u^2$ that is aperiodic.\footnote{If there is also a non-empty $v$, check the last $u^2$ in each
+run to be followed by $v$ and if not remove the last. Other $u^2$ in a
+run have $u$ following and therefore $v$.} We can also assume that the output bit vector (indicating occurrences)
+has $u^2$ occurrences and is sparse, that is the
+ occurrences are $\pi=|u|$ (or even 
+$\C\pi$) positions apart. Note that in non-binary alphabets the bit vector is naturally sparse $\C$
+positions apart between characters.  
+
+ 
+ 
+ 
+
+To find a mask of the last $u^2$ occurrences in each run,
+shift the mask left by $|u|$ bits and perform  $m \, \& ~ (m\ll\pi)$.
+Every $1$ bit that is not last in its run is becoming $0$.
+Using this operation take a mask with $v$ in all positions $2|u|$
+after the last occurrences in each run of $u^2$. Perform \xor\ to find
+differences.  In each such unaligned field, find if the field is
+non-zero.  Fields that are non-zero will zero out the last occurrence
+of $u^2$ in their run and recompute the last occurrences in these
+runs.
+
+Now, for each run we have to remove the last $k-1$ occurrences of
+$u^2$ since these are not occurrences of $u^k$.  Take this mask, shift
+left by $\pi \, k$ positions and subtract the mask. This gets a $\pi
+\, k-1$ one bits to the left of the last $1$ in each run. Clear these
+bits from the first mask of $u^2$ occurrences and left with
+occurrences of $u^k$ or $u^kv$. This requires $O(\log \W \log\log \W)$
+time using an integer multiplication algorithm.
+
+}
+% If we don't have the big words,
+% I think this would take $O(\log \W \log\log \W)$ time
+% using an integer multiplication algorithm.
+
+
+%Open question. Can we use the natural $\C$ padding in the output?
+
+
+
+
+\comment{
+\subsubsection{Sparsification via Two-Samples}\rem{not sure this is useful-remove if not}
+There is always a sample of size $2$ the will get us this sparse.
+See Crochemore Galil Gasienicec Park and Rytter. This is not complete yet.
+
+Two sample to get $\log \pi$ sparsification.
+Since the results are sparse, we could potentially get the fields
+with the integer multiplication results in there.
+But we only want the sparse output results, the inputs are not sparse.
+
+Can this be combined with with section above perhaps to get constant time
+with small words?
+}
+
+
+\paragraph{Preprocessing the pattern}
+
+The algorithm above requires the period length of the pattern $\pi$
+(see Section~\ref{sub:prepro}) and certain deterministic samples to solve
+the string matching problem.
+%This can be computed in $O(\W)$ time.
+%
+We can take the pattern prefix of length $\W/\log \W$
+and match it against itself and find its period using
+one multiplication as above.
+If the period is small, we can verify it and find
+if and where it terminates. If not, see if there
+is any value and if possible to work out an algorithm
+that takes constant operations. This might give a hint
+for better string matching algorithm.
+
+We can separate out the preprocessing. But first we should solve
+the string matching and then maybe we can get preprocessing in
+constant time even.
+
+
+Observe that even that the pattern preprocessing
+is done in constant time and can be computed
+repeatedly, the preprocessing has only to be done once
+since the \wssm\ instruction is only
+used with one pattern string, the whole pattern if the
+pattern is short ($m\leq \C$)
+or the prefix of the critical factorization tail if the
+pattern is long.
+
+
+
+
+
+
+
+
+
+
+
+
+\subsection{Four Russians' table lookup technique}
+The specialized \wssm\ and \wslm\ instruction can both be emulated
+using the {\em four Russian's table lookup technique}~\cite{four-rus:70}.
+The time and space required to create a size $n$ lookup table limit
+the packing factor $\C$, typically to $\C \leq \log_{|\Sigma|} n$.
+The lookup table size can be reduced further to $n^\epsilon$ limiting
+the packing factor further to $\C \leq \epsilon \log_{|\Sigma|} n$
+and increasing the time by an $\epsilon$ multiplicative factor.
+In practice, a table lookup implementation would also benefit
+from small table sizes that fit in the fast cache memory, 
+limiting the size of such lookup tables even further.
+Thus, using large lookup tables would typically make the algorithm impractical,
+sacreficing both the small space and the sequential cache 
+friendly access benefits of our algorithm.
+However, when the alphabet size and the table sizes
+are small, table lookup may be beneficial.
+
+We outline here only how the four Russian's table lookup technique
+emulates the \wslm\ instruction, which is particularly simple.
+The \wssm\ bit-parallel emulation above is better than the
+equivalent table lookup emulation of \wssm. 
+There is some circumstantial evidence that the \wslm\ emulation
+is harder than the \wssm\ emulation, since 
+in the parallel random access machine model the best maximum suffix algorithms
+take significantly more time than string matching~\cite{ac:91,dis:94,is-canonical:92}.
+
+We create a lookup table $\mbox{maximum-suffix}[x]$ that
+gives the length of the lexicographically maximum suffix,
+for all strings $x$ represented as integers in base $\log_2 |\Sigma|$,
+with their most significant digit as the first character.
+Using this definition, short strings are padded with $``0"$
+characters on the left and therefore have the same maximum
+suffix as long strings, with the exception of the $0$ entry
+that has the maximum suffix that is the whole string and its
+length is the length of the whole string which must be
+specified separately.
+The table is created by appending a new first non-zero
+character on the left of a shorter string and comparing the whole new string
+lexicographically as one integer to the maximum suffix
+of the string before adding the first new character using 
+appropriate shift operations.
+The time to create the $\mbox{maximum-suffix}$ 
+lookup table is clearly linear in its size.
+
+
+
+
+
+
+
+\section{\wssm\ on contemporary commodity processors}
+\label{sec:hardware}
+We conducted benchmarks of the 
+packed string matching instructions 
+that are available 
+in the ``Efficient Accelerated String and Text Processing: Advanced String Operations'' 
+part of the 
+{\em Streaming SIMD Extension (SSE4.2) and the Advanced Vector Extension (AVX)}
+ on Intel Sandy Bridge processors~\cite{intel-sse4:07,intel-avx:11} and consulted Intel's
+Optimization Reference Manual~\cite{intel-optimization:11}, both
+ indicate remarkable performance.
+The instruction
+{\em Packed Compare Explicit Length Strings Return Mask 
+(PCMPESTRM, Equal Ordered Aggregation)}
+produces a bit mask that is suitable for short patterns 
+and the similar but slightly faster instruction
+{\em Packed Compare Explicit Length Strings Return Index (PCMPESTRI)}
+produces only the index of the first occurrence, 
+which is suitable for our longer pattern algorithm.\footnote{On current generation high end Intel
+  Sandy Bridge processors, $2$-cycle throughput and $7$- or $8$-cycle
+  latency~\cite[\S C.3.1]{intel-optimization:11}. 
+  We did not evaluate new AMD processors
+  that also realize the packed string matching instructions~\cite{amd-avx:11,amd-optimization:11}.
+  Implicit length (null terminated) packed string instruction  variants are also available.} 
+These instructions support \wssm\ with $8$-bit or $16$-bit characters and
+with up to $128$-bit long pattern and text strings.
+There are currently no \wslm\ equivalent instructions available.
+
+%These packed string matching instructions come in two flavors: 
+%{\em Packed Compare Explicit Length Strings Return Mask 
+%(PCMPESTRM)} %, Equal Ordered Aggregation)}
+%that produces a bit mask that is suitable for short patterns, 
+%and the similar % but slightly faster 
+%{\em Packed Compare Explicit Length Strings Return Index (PCMPESTRI)}
+%that produces only the index of the first occurrence, 
+%which is suitable for our longer pattern algorithm.
+%
+%
+%We typically use these instructions to search for an
+%up to $8$-character pattern in a $16$-character text ($64$-bit in $128$-bit);
+%observe that in this case there is always a deterministic sample of size at most
+%$\log_2 8 = 3$  and our word RAM emulation
+%can be realized with only $3$ shift operations instead of multiplication and without padding 
+%an optimized platform specific implementation 
+%might offer reasonable performance.
+
+\begin{figure}[htb]
+\begin{center}
+\begin{tabular}{r r r r r r r }
+\tiny 2 & \tiny 4 & \tiny 8 & \tiny 16 & \tiny 32 & \tiny 64 & \tiny 128 \\ \hline
+\tiny{\bf SSECP}~4.44&\tiny{\bf SSECP}~4.57&\tiny UFNDMQ4~4.99&\tiny BNDMQ4~4.23&\tiny BNDMQ4~3.83&\tiny LBNDM~3.91&\tiny BNDMQ4~3.71 \\
+\tiny SKIP~4.80& \tiny RF~5.07&\tiny{\bf SSECP}~5.00&\tiny SBNDMQ4~4.31&\tiny BNDMQ6~3.86&\tiny BNDMQ4~3.94&\tiny HASH5~3.83\\
+\tiny SO~4.84&\tiny BM~5.33&\tiny FSBNDM~5.05&\tiny UFNDMQ4~4.31&\tiny SBNDMQ4~3.95&\tiny SBNDMQ4~3.96&\tiny HASH8~3.93\\
+\tiny FNDM~4.94&\tiny BNDMQ2~5.46&\tiny SBNDMQ2~5.08&\tiny UFNDMQ6~4.47&\tiny SBNDMQ6~3.97&\tiny BNDMQ6~3.97&\tiny HASH3~3.94\\
+\tiny FSBNDM~5.03&\tiny BF~5.58& \tiny BNDMQ2~5.13&\tiny SBNDMQ6~4.57&\tiny UFNDMQ4~4.00&\tiny HASH5~3.98&\tiny BNDMQ6~3.97\\
+& & & \tiny 23 {\bf SSECP}~5.00& \tiny 27 {\bf SSECP}~5.29& \tiny 39 {\bf SSECP}~4.88 &\tiny 42 {\bf SSECP}~4.73 \\
+\hline %\\ \hline
+\tiny{\bf SSECP}~4.28&\tiny{\bf SSECP}~4.49&\tiny BNDMQ2~4.42&\tiny SBNDMQ2~4.08&\tiny UFNDMQ2~3.75&\tiny SBNDMQ4~3.67&\tiny BNDMQ4~3.70\\
+\tiny FFS~4.88& \tiny SVM1~4.84&\tiny SBNDMQ2~4.48&\tiny UFNDMQ2~4.08&\tiny BNDMQ4~3.79&\tiny BNDMQ4~3.72&\tiny SBNDMQ4~3.71\\
+\tiny GRASPM~4.93&\tiny SBNDMQ4~4.85&\tiny SBNDM~4.59&\tiny SBNDMQ4~4.10&\tiny SBNDMQ4~3.80&\tiny UFNDMQ4~3.80&\tiny HASH5~3.75\\
+\tiny BR~5.14&\tiny BOM2~4.95&\tiny SBNDM2~4.59&\tiny SBNDM2~4.13&\tiny UFNDMQ4~3.80&\tiny BNDMQ2~3.89&\tiny UFNDMQ4~3.77\\
+\tiny BWW~5.14&\tiny EBOM~5.25& \tiny UFNDMQ2~4.69&\tiny BNDMQ2~4.14&\tiny BNDMQ2~3.89&\tiny SBNDM2~3.96&\tiny HASH8~3.80\\
+& & \tiny 13 {\bf SSECP}~5.00& \tiny 22 {\bf SSECP}~5.08& \tiny 35 {\bf SSECP}~4.77& \tiny 39 {\bf SSECP}~4.77&\tiny 45 {\bf SSECP}~4.76 
+\end{tabular}
+\end{center}
+\caption{\small\label{tab:smart}Fastest SMART algorithms on English text
+and on random 16-character text.}
+\end{figure}
+
+Faro and Lecroq kindly made their extensive  
+{\em String Matching Algorithms Research Tool (SMART)} 
+available to us~\cite{FL2011}. 
+Results of the benchmarks that we put together in SMART 
+%on an Intel Core i5-2520M processor 
+are summarized in Figure \ref{tab:smart}.
+Algorithm {\em SSECP}, our implementation that
+uses raw packed string matching instructions
+for up to $8$-character long patterns,
+performed among the top algorithms;
+our packed string matching implementation of the Crochemore-Perrin algorithm   
+performed very well on many combinations of input types and longer patterns.
+In general, the {\em longer is the pattern}
+ and the {\em larger is the variation of the alphabet characters}, 
+those other algorithms that skip parts of the text have the 
+greater advantage.
+See Faro and Lecroq's~\cite{FL2011} paper and the SMART 
+implementation for further details on the listed SMART algorithms. 
+
+These encouraging preliminary experimental results must be interpreted cautiously, since
+on one hand we have implemented the benchmarks very quickly with minimal effort
+to optimize the code,
+while on the other hand 
+the existing SMART algorithms %in the framework 
+could benefit
+as well from packed string matching instructions and from
+additional handcrafted machine specific optimization; in fact,
+a handful of the existing SMART algorithms 
+already use other Streaming SIMD Extension instructions.
+
+
+\section{Conclusions}
+\label{sec:conclusions}
+We demonstrated how to employ word-size 
+string matching
+instructions to design optimal packed string matching algorithms 
+in the word-RAM, which are fast both in theory and in practice.  There is
+an array of interesting questions that arise from our investigation.
+\begin{enumerate}
+\item Is it possible to improve our \wssm\ emulation further towards constant time, 
+including any pattern pre-processing,
+with only $\W$-bit words? 
+With only $\mathop{AC}^0$ operations (i.e.~no integer multiplication)?
+
+\item Derive Boyer-Moore style algorithms,
+that skip parts of the text~\cite{bm:77,commentz-walter:79,nr:98,yao:79}
+and may be therefore faster on average,
+using packed string matching instructions.
+%\rem{Add references}
+
+\item Extend our specialized packed string instruction results
+to the dictionary matching problem
+with multiple patterns~\cite{ac:75,belazzougui:10,commentz-walter:79,nr:98}
+and to other string matching problems. 
+
+\item Find critical factorizations in linear-time using 
+equality pairwise symbol comparisons (i.e.~no alphabet order). 
+Such algorithms could also have applications
+in our packed string model, possibly eliminating our reliance on the
+\wslm\ instruction.
+
+\item Explore more efficient \wslm\ emulations.
+The \wslm\ instruction might be useful in other string algorithms, 
+e.g.~Cole and Hariharan's~\cite{ch:02} approximating string matching.
+
+\item Further compare the performance of our new algorithm using hardware
+packed string matching instructions to existing implementations,
+e.g.~Faro and Lecroq's~\cite{FL2011} SMART and 
+the SSE4.2 platform specific {\em strstr} in {\em glibc}. 
+
+\item
+Experiment with our bit-parallel \wssm\ emulation, 
+that may also be useful in practice
+in the case of very small alphabets,
+e.g.~binary alphabets or 2-bit DNA alphabets~\cite{fl:2009,tp:1997}. 
+\end{enumerate}
+
+\comment{
+Our results highlight the unfortunate
+abysmal disconnect between the theoretical algorithms research
+community and the applied universe;
+we hope that our small contribution can fester
+steady and frequent exchanges of ideas in the future.}
+
+
+\section*{Acknowledgments}
+We are grateful to Simone Faro and Thierry Lecroq for making 
+their SMART framework available to us.
+
+%We are grateful to anybody and everybody who believes that they deserve our gratitude.
+
+
+\bibliographystyle{abbrv}
+\bibliography{ref}
+
+
+\comment{
+
+\appendix
+\section*{APPENDIX}
+
+\section{Duval's Algorithm}
+\label{app:duval-algorithm}
+
+The following code for Duval's algorithm~\cite{du:83}, which finds the
+least circular shift of a string~$s$, is credited to Zhou Yuan and
+available on the Web.
+
+\medskip
+
+{\small
+\begin{verbatim}
+minimumExpression(s) {
+   s = s + s;
+   len = length(s), i = 0, j = 1, k = 0;
+   while (i + k < len && j + k < len) {
+      if (s[i+k] == s[j+k]) k++;
+      else if (s[i+k] > s[j+k]) { i = i+k+1; if(i <= j) i = j+1; k = 0; }
+      else if (s[i+k] < s[j+k]) { j = j+k+1; if(j <= i) j = i+1; k = 0; }
+   }
+   return min(i, j);
+}
+\end{verbatim}
+}
+
+\medskip
+
+
+One string position (among $i$ and $j$) points to the currently best
+suffix and the other one points to the current candidate. Whenever
+there is a mismatch after matching $k$ characters ($s[i+k] \neq
+s[j+k]$), one string position is ``defeated'' and the next candidate
+is taken. At the end, the leftmost of the two positions gives the
+answer. The total running time is linear, since each string position
+never backtracks with respect itself and the other position.
+
+\section{Rytter's Algorithm}
+\label{app:rytter-algorithm}
+
+The following linear-time code from Rytter~\cite{Rytter03a} finds all
+the periods for a string $v$ that is \emph{self-maximal}, that is,
+lexicographically maximum among its suffixes. When the code assigns a
+new value to \texttt{pi}, this is the length of the current prefix of
+$v$, since a smaller value (i.e., a shorter period) would
+contradict the fact that $v$ is lexicographically maximum.
+
+\medskip
+
+{\small
+\begin{verbatim}
+selfmax_period(v) {
+   pi = 1, len = length(v);
+   for (i = 1; i < len; i++)
+      if (v[i] != v[i-pi]) pi = i+1;
+   return pi;
+}
+\end{verbatim}
+}
+
+\medskip
+
+Note that the critical factorization $x=uv$ found by the
+Crochemore-Perrin algorithm is such that $v$ is lexicographically
+maximum. Also, any of its prefixes satisfies this property: so we can
+apply the code above to find its period as well (as an intermediate
+step during the \texttt{for} loop) and how long it extends to the rest
+of $v$ (when the value of \texttt{pi} changes).
+}
+
+
+
+
+
+\end{document}
+
+
+
+
+
+
+
+
